@@ -33,12 +33,22 @@ COPY scripts /app/scripts/
 # Make scripts executable
 RUN chmod +x /app/install_uv_tools.sh
 
-# Configure SSH for Git operations (if needed for private repos)
-# Uncomment and add your SSH key during build if using private repositories:
-# RUN mkdir -p /root/.ssh
-# COPY id_rsa /root/.ssh/id_rsa
-# RUN chmod 600 /root/.ssh/id_rsa && \
-#     ssh-keyscan github.com >> /root/.ssh/known_hosts
+# Configure SSH for Git operations
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
+# Generate SSH key for GitHub
+RUN ssh-keygen -t ed25519 -C "every_nownthen_docker" -f /root/.ssh/id_ed25519 -N ""
+
+# Add GitHub to known hosts
+RUN ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null
+
+# Configure SSH to use the generated key
+RUN echo "Host github.com\n\
+    HostName github.com\n\
+    User git\n\
+    IdentityFile /root/.ssh/id_ed25519\n\
+    StrictHostKeyChecking no" > /root/.ssh/config && \
+    chmod 600 /root/.ssh/config
 
 # Install UV tools from Git repositories
 # Comment this out if you don't have any tools in uv_tools.txt yet
@@ -57,6 +67,13 @@ RUN crontab /app/crontab
 RUN echo '#!/bin/bash\n\
     echo "Starting Every Now & Then Script Runner..."\n\
     echo "Environment variables loaded from .env"\n\
+    echo ""\n\
+    echo "=== SSH PUBLIC KEY FOR GITHUB ==="\n\
+    echo "Add this key to your GitHub account (Settings > SSH and GPG keys):"\n\
+    echo ""\n\
+    cat /root/.ssh/id_ed25519.pub\n\
+    echo ""\n\
+    echo "================================"\n\
     echo ""\n\
     echo "Available scripts:"\n\
     ls -1 /app/scripts/ | grep -v "^\\."\n\
