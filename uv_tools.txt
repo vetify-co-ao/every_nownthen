@@ -1,9 +1,10 @@
 # UV Tools - Git repositories to install as tools
 # Format: git+<repository_url>
 # These will be installed using: uv tool install <repository_url>
+# Use HTTPS for public repos, SSH (git+ssh://git@github.com/...) for private repos
 
-# Agentic Document Archiver
-git+ssh://git@github.com/kindalus/agentic_document_archiver.git
+# Agentic Document Archiver (public repo)
+git+https://github.com/kindalus/agentic_document_archiver.git
 
-# Vendus Reports
+# Vendus Reports (public repo)
 git+https://github.com/kindalus/vendus_reports.git
