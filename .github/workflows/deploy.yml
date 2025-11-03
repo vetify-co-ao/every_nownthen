@@ -15,7 +15,7 @@ jobs:
         run: |
           export TAG=$(date +%s)
           echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "IMAGE=${{ vars.DOCKERHUB_USERNAME }}/vetify-every-nownthen:$TAG" >> $GITHUB_ENV
+          echo "IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/vetify-every-nownthen:$TAG" >> $GITHUB_ENV
           echo "HOME=/tmp" >> $GITHUB_ENV
 
       - name: Build container image
