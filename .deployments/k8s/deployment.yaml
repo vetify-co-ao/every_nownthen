@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: every-nownthen
+    namespace: vetify
+    labels:
+        app: every-nownthen
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: every-nownthen
+    template:
+        metadata:
+            labels:
+                app: every-nownthen
+        spec:
+            containers:
+                - name: every-nownthen
+                  image: <IMAGE>
+                  imagePullPolicy: Always
+
+                  # Mount the service account JSON file from ConfigMap
+                  volumeMounts:
+                      - name: service-account-key
+                        mountPath: /etc/service_account.json
+                        subPath: service_account.json
+                        readOnly: true
+
+                  # Load environment variables from ConfigMap
+                  envFrom:
+                      - configMapRef:
+                            name: every-nownthen-env-config
+
+                  resources:
+                      requests:
+                          memory: "256Mi"
+                          cpu: "100m"
+                      limits:
+                          memory: "512Mi"
+                          cpu: "500m"
+
+                  # Volume for persistent data
+                  volumeMounts:
+                      - name: data
+                        mountPath: /data
+                      - name: service-account-key
+                        mountPath: /etc/service_account.json
+                        subPath: service_account.json
+                        readOnly: true
+
+            volumes:
+                # ConfigMap containing the service account JSON
+                - name: service-account-key
+                  configMap:
+                      name: every-nownthen-service-account-key-path-config
+                      items:
+                          - key: service_account.json
+                            path: service_account.json

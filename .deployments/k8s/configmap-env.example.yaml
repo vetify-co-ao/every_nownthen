@@ -1,0 +1,27 @@
+# Example ConfigMap for environment variables
+# Create the actual ConfigMap in your cluster using:
+# kubectl create configmap every-nownthen-env-config --from-env-file=.env
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: every-nownthen-env-config
+    namespace: default
+data:
+    # Example environment variables
+    # Replace these with your actual values
+    GREETING_NAME: "World"
+    GREETING_LANGUAGE: "en"
+
+    # Add your script-specific environment variables here
+    # API_KEY: "your-api-key"
+    # DATABASE_URL: "postgresql://user:pass@host:5432/db"
+    # SMTP_HOST: "smtp.gmail.com"
+    # SMTP_PORT: "587"
+    # SMTP_USER: "user@example.com"
+    # SMTP_PASSWORD: "password"
+
+    # Application settings
+    # DEBUG: "false"
+    # LOG_LEVEL: "INFO"
+    # TZ: "UTC"

@@ -1,0 +1,22 @@
+[project]
+name = "every-nownthen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "agentic-document-classifier",
+    "dotenv>=0.9.9",
+    "google-api-python-client>=2.185.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.2",
+    "google-genai>=1.46.0",
+    "pydantic-ai>=1.4.0",
+]
+
+[tool.uv.sources]
+agentic-document-classifier = { git = "https://github.com/kindalus/agentic_document_classifier.git" }
+
+[tool.pyright]
+reportMissingTypeStubs = "none"
+reportUnknownVariableType = "none"

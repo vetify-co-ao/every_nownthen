@@ -1,0 +1,25 @@
+# Every Now & Then - Cron Schedule
+# Format: minute hour day month weekday command
+#
+# Examples:
+# 0 9 * * * - Every day at 9 AM
+# 0 */6 * * * - Every 6 hours
+# 0 0 * * 0 - Every Sunday at midnight
+# */15 * * * * - Every 15 minutes
+#
+# See: https://crontab.guru/ for cron schedule expressions
+
+# Example: Run say_hello every day at 9 AM
+# 0 9 * * * cd /app/scripts/say_hello && /root/.cargo/bin/uv run say_hello.py >> /var/log/cron.log 2>&1
+
+# Example: Run a UV tool every 6 hours
+# UV tools are installed system-wide and can be run directly without uv command
+# 0 */6 * * * agentic_document_archiver >> /var/log/cron.log 2>&1
+
+# Add your scheduled scripts below:
+
+# Every fourth day of the month at 6 AM run vendus reports
+0 6 4 * * vendus-reports --output /tmp --archive all >> /var/log/cron.log 2>&1
+
+# Every day at 7 AM archive documents using AI
+0 7 * * * agentic-archive  >> /var/log/cron.log 2>&1
