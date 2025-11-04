@@ -18,8 +18,8 @@
 
 # Add your scheduled scripts below:
 
-# Every fourth day of the month at 6 AM run vendus reports
-0 6 4 * * vendus-reports --output /tmp --archive all >> /var/log/cron.log 2>&1
+# Every fourth day of the month at 8:50 AM run vendus reports
+50 8 4 * * /root/.local/bin/vendus-reports --output /tmp --archive all >> /var/log/cron.log 2>&1
 
-# Every day at 7 AM archive documents using AI
-0 7 * * * agentic-archive  >> /var/log/cron.log 2>&1
+# Every day at 8:50 AM archive documents using AI
+50 8 * * * /root/.local/bin/agentic-archive >> /var/log/cron.log 2>&1

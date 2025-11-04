@@ -32,6 +32,11 @@ spec:
                       - configMapRef:
                             name: every-nownthen-env-config
 
+                  # Set timezone
+                  env:
+                      - name: TZ
+                        value: "Africa/Luanda"
+
                   resources:
                       requests:
                           memory: "256Mi"
