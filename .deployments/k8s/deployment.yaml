@@ -42,8 +42,6 @@ spec:
 
                   # Volume for persistent data
                   volumeMounts:
-                      - name: data
-                        mountPath: /data
                       - name: service-account-key
                         mountPath: /etc/service_account.json
                         subPath: service_account.json
