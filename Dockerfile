@@ -50,6 +50,10 @@ RUN echo '#!/bin/bash\n\
     echo "Starting Every Now & Then Script Runner..."\n\
     echo "Environment variables loaded from .env"\n\
     echo ""\n\
+    \n\
+    # Export all environment variables to a file for cron to use\n\
+    printenv | grep -v "no_proxy" > /etc/environment\n\
+    \n\
     echo "Available scripts:"\n\
     ls -1 /app/scripts/ | grep -v "^\\."\n\
     echo ""\n\
