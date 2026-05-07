@@ -24,5 +24,5 @@
 # Every day at 9:00 AM archive documents using AI
 0 9 * * * . /etc/environment; /root/.local/bin/agentic-archive >> /var/log/cron.log 2>&1
 
-# iXLSX offer mailer — Mon/Thu at 09:00
-0 9 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1
+# iXLSX offer mailer — Mon/Thu at 08:00
+0 8 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1

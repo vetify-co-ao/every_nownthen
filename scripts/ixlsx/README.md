@@ -17,10 +17,10 @@ What it does:
 Defined in `every_nownthen/crontab`:
 
 ```
-0 9 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1
+0 8 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1
 ```
 
-Mondays and Thursdays at 09:00 (container `TZ`).
+Mondays and Thursdays at 08:00 (container `TZ`).
 
 ## Dependencies
 
@@ -30,9 +30,13 @@ or `requirements.txt`.
 
 ## Environment variables
 
-All consumed from the project-root `.env`. Documented in
+Consumed from the project-root `.env` and documented in
 `every_nownthen/.env.info` under the "iXLSX" section. Required:
-`VENDUS_API_KEY`, `IMPERSONATED_EMAIL`, `SERVICE_ACCOUNT_KEY_PATH`.
+`VENDUS_API_KEY`, `SERVICE_ACCOUNT_KEY_PATH`.
+
+The Gmail impersonated user and email headers are fixed in `ixlsx.py`:
+`comercial@vetify.co.ao`, `Vetify <comercial@vetify.co.ao>`,
+`encomendas@vetify.co.ao`, and `Oferta Vetify %s`.
 
 ## Bundled assets
 

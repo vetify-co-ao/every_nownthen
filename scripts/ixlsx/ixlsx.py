@@ -43,16 +43,16 @@ OUTPUT_DIR = os.environ.get("IXLSX_OUTPUT_DIR", "/tmp")
 
 # Gmail API
 SERVICE_ACCOUNT_KEY_PATH = os.environ["SERVICE_ACCOUNT_KEY_PATH"]
-IMPERSONATED_EMAIL = os.environ["IMPERSONATED_EMAIL"]
+IMPERSONATED_EMAIL = "comercial@vetify.co.ao"
 GMAIL_API_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://mail.google.com/",
 ]
 
 # Email content
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "Vetify <comercial@vetify.co.ao>")
-REPLY_TO = os.environ.get("REPLY_TO", "encomendas@vetify.co.ao")
-EMAIL_SUBJECT_TEMPLATE = os.environ.get("EMAIL_SUBJECT_TEMPLATE", "Oferta Vetify %s")
+EMAIL_FROM = "Vetify <comercial@vetify.co.ao>"
+REPLY_TO = "encomendas@vetify.co.ao"
+EMAIL_SUBJECT_TEMPLATE = "Oferta Vetify %s"
 
 # E2E test recipients (comma-separated env var)
 TEST_EMAILS = [
