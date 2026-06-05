@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("VENDUS_API_KEY", "test-vendus-key")
 os.environ.setdefault("SERVICE_ACCOUNT_KEY_PATH", "/tmp/test-service-account.json")
+os.environ.setdefault("DASHY_API_KEY", "test-dashy-key")
 
 import ixlsx
 
@@ -30,6 +31,7 @@ class BuildEmailMessageTests(unittest.TestCase):
             {
                 "VENDUS_API_KEY": "test-vendus-key",
                 "SERVICE_ACCOUNT_KEY_PATH": "/tmp/test-service-account.json",
+                "DASHY_API_KEY": "env-dashy-key",
                 "IMPERSONATED_EMAIL": "env-user@example.com",
                 "EMAIL_FROM": "Env Sender <env-user@example.com>",
                 "REPLY_TO": "env-reply@example.com",
@@ -50,6 +52,7 @@ class BuildEmailMessageTests(unittest.TestCase):
             {
                 "VENDUS_API_KEY": "test-vendus-key",
                 "SERVICE_ACCOUNT_KEY_PATH": "/tmp/test-service-account.json",
+                "DASHY_API_KEY": "test-dashy-key",
             },
             clear=True,
         ):

@@ -38,6 +38,13 @@ VENDUS_API_BASE_URL = "https://www.vendus.pt/ws/v1.2"
 VENDUS_PRODUCTS_ENDPOINT = "products"
 VENDUS_CLIENTS_ENDPOINT = "clients"
 
+# Dashy API (lot expiry enrichment)
+DASHY_API_KEY = os.environ["DASHY_API_KEY"]
+DASHY_API_BASE_URL = "https://bi.vetify.co.ao"
+DASHY_TIMEOUT_SECONDS = 60
+DASHY_STOCK_LOTS_HORIZON_DAYS = 720
+DASHY_STOCK_LOTS_LIMIT = 200
+
 # Output
 OUTPUT_DIR = os.environ.get("IXLSX_OUTPUT_DIR", "/tmp")
 
@@ -147,8 +154,116 @@ def get_client_emails():
     return emails
 
 
+# --- Dashy API Functions ---
+def to_float(value, default=0.0):
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def select_nearest_lot_expiry(stock_lots_payload):
+    """Returns the nearest YYYY-MM-DD expiry with remaining stock, or blank."""
+    lot_labels = stock_lots_payload.get("x", [])
+    remaining_quantities = stock_lots_payload.get("series", {}).get("remaining_qty", [])
+
+    expiry_dates = []
+    for index, label in enumerate(lot_labels):
+        remaining_qty = to_float(
+            remaining_quantities[index] if index < len(remaining_quantities) else 0
+        )
+        if remaining_qty <= 0:
+            continue
+
+        # Dashy OpenAPI documents stock_lots_at_risk x labels as
+        # "SKU | fornecedor | lote | validade | importação".
+        parts = [part.strip() for part in str(label).split("|")]
+        if len(parts) < 4:
+            continue
+
+        expiry_text = parts[3]
+        try:
+            expiry_dates.append(datetime.date.fromisoformat(expiry_text))
+        except ValueError:
+            print(f"Warning: Could not parse Dashy lot expiry '{expiry_text}'.")
+
+    if not expiry_dates:
+        return ""
+    return min(expiry_dates).isoformat()
+
+
+class DashyClient:
+    def __init__(self, api_key, base_url=DASHY_API_BASE_URL, session=None):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.session = session or requests.Session()
+        self.session.headers.update(
+            {"Accept": "application/json", "User-Agent": "every-nownthen-ixlsx/1.0"}
+        )
+        self._authenticated = False
+
+    def _get(self, path, params=None, include_api_key=False):
+        request_params = dict(params or {})
+        if include_api_key:
+            request_params["api_key"] = self.api_key
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}{path}",
+                params=request_params,
+                timeout=DASHY_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            details = (
+                getattr(e.response, "text", "")
+                if getattr(e, "response", None)
+                else ""
+            )
+            details = details.replace(self.api_key, "***")
+            status = getattr(getattr(e, "response", None), "status_code", "unknown")
+            raise RuntimeError(
+                f"Dashy request failed for {path} (status={status}). {details[:500]}"
+            ) from e
+        except ValueError as e:
+            raise RuntimeError(f"Dashy returned invalid JSON for {path}.") from e
+
+    def authenticate(self):
+        if self._authenticated:
+            return
+
+        # The Dashy OpenAPI documents ApiKeyQuery as `api_key` and notes that
+        # a valid key creates a temporary Dashy session cookie. Dataset calls
+        # then use that cookie and must not repeat api_key as a business param.
+        self._get("/api/dimensions/product", include_api_key=True)
+        self._authenticated = True
+
+    def get_nearest_available_lot_expiry(self, sku):
+        self.authenticate()
+        payload = self._get(
+            "/api/datasets/stock_lots_at_risk",
+            params={
+                "product_sku": sku,
+                "horizon_days": DASHY_STOCK_LOTS_HORIZON_DAYS,
+                "limit": DASHY_STOCK_LOTS_LIMIT,
+            },
+        )
+        return select_nearest_lot_expiry(payload)
+
+
+def get_nearest_available_lot_expiry_or_blank(dashy_client, sku):
+    try:
+        return dashy_client.get_nearest_available_lot_expiry(sku)
+    except Exception as e:
+        print(f"Warning: Could not fetch Dashy lot expiry for {sku}: {e}")
+        return ""
+
+
 # --- XLSX Building Function ---
-def build_xlsx_file(inventory):
+def build_xlsx_file(inventory, dashy_client=None):
     """Builds the XLSX file from a template and inventory data."""
     print(f"Building XLSX file from template: {XLSX_TEMPLATE_PATH}...")
     if not os.path.exists(XLSX_TEMPLATE_PATH):
@@ -173,6 +288,8 @@ def build_xlsx_file(inventory):
         sheet[EXCEL_DATE_CELL] = today_date_str_cell
 
         inventory_map = {item["ProductId"]: item for item in inventory}
+        lot_expiry_client = dashy_client or DashyClient(DASHY_API_KEY)
+        lot_expiry_cache = {}
 
         row_index = EXCEL_FIRST_DATA_ROW
         while True:
@@ -199,8 +316,17 @@ def build_xlsx_file(inventory):
                     "NetPrice", 0.0
                 )
 
+                due_date_cell = f"{EXCEL_DUE_DATE_COLUMN_LETTER}{row_index}"
                 if qty <= 0:
-                    sheet[f"{EXCEL_DUE_DATE_COLUMN_LETTER}{row_index}"] = ""
+                    sheet[due_date_cell] = ""
+                else:
+                    if product_ref not in lot_expiry_cache:
+                        lot_expiry_cache[product_ref] = (
+                            get_nearest_available_lot_expiry_or_blank(
+                                lot_expiry_client, product_ref
+                            )
+                        )
+                    sheet[due_date_cell] = lot_expiry_cache[product_ref]
 
             row_index += 1
 
@@ -423,6 +549,7 @@ def main():
 if __name__ == "__main__":
     print("=== iXLSX configuration ===")
     print(f"VENDUS_API_KEY: {'*' * 8 if VENDUS_API_KEY else 'Not set'}")
+    print(f"DASHY_API_KEY: {'*' * 8 if DASHY_API_KEY else 'Not set'}")
     print(f"XLSX_TEMPLATE_PATH: {XLSX_TEMPLATE_PATH}")
     print(f"EMAIL_TEMPLATE_PATH: {EMAIL_TEMPLATE_PATH}")
     print(f"SERVICE_ACCOUNT_KEY_PATH: {SERVICE_ACCOUNT_KEY_PATH}")
