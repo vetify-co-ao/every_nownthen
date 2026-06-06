@@ -7,10 +7,12 @@ What it does:
 
 1. Pulls product inventory and active client emails from the Vendus API.
 2. Pulls nearest available lot expiries from Dashy for stocked products.
-3. Fills a bundled XLSX template (`vetify-template.xlsx`) with stock status,
-   net price, current offer date, and due date.
-4. Renders an HTML body from the bundled `email-template.html`.
-5. Sends the result via the Gmail API (service account with domain-wide
+3. Downloads the XLSX and HTML templates from the ECM when `IXLSX_API_KEY` is set,
+   falling back to bundled files if unavailable.
+4. Fills the XLSX template with stock status, net price, current offer date,
+   and due date.
+5. Renders the HTML email body.
+6. Sends the result via the Gmail API (service account with domain-wide
    delegation), BCC'ing all clients.
 
 ## Schedule
@@ -35,11 +37,28 @@ Consumed from the project-root `.env` and documented in
 `every_nownthen/.env.info` under the "iXLSX" section. Required:
 `VENDUS_API_KEY`, `DASHY_API_KEY`, `SERVICE_ACCOUNT_KEY_PATH`.
 
+Optional:
+
+- `IXLSX_API_KEY` — ECM API key for runtime template downloads.
+
 The Gmail impersonated user and email headers are fixed in `ixlsx.py`:
 `comercial@vetify.co.ao`, `Vetify <comercial@vetify.co.ao>`,
 `encomendas@vetify.co.ao`, and `Oferta Vetify %s`.
 
-## Bundled assets
+## Template assets
+
+Runtime ECM templates are used when `IXLSX_API_KEY` is set:
+
+- `vetify-template.xlsx` — ECM node `DJBTl5Ls`
+- `email-template.html` — ECM node `G64RDgSJ`
+
+Both are downloaded via:
+
+```
+https://vcrm.lightray.cloud/api/nodes/<NODE_ID>/-/export?api_key=<IXLSX_API_KEY>
+```
+
+Fallback bundled assets remain in-repo:
 
 - `vetify-template.xlsx` — Excel template. Sheet `Sheet1`, references in
   column A from row 5, date cell `D2`. Stock status → C, net price → D,
@@ -49,7 +68,8 @@ The Gmail impersonated user and email headers are fixed in `ixlsx.py`:
   fails or no available lot exists, I is left blank.
 - `email-template.html` — HTML email body.
 
-Edit either file in-repo and redeploy. There is no env override.
+Fallback is per asset: if one ECM download fails, only that file falls back to
+its bundled project copy.
 
 ## E2E test
 

@@ -6,6 +6,7 @@ from unittest.mock import patch
 os.environ.setdefault("VENDUS_API_KEY", "test-vendus-key")
 os.environ.setdefault("SERVICE_ACCOUNT_KEY_PATH", "/tmp/test-service-account.json")
 os.environ.setdefault("DASHY_API_KEY", "test-dashy-key")
+os.environ["IXLSX_API_KEY"] = ""
 
 import ixlsx
 

@@ -45,6 +45,13 @@ DASHY_TIMEOUT_SECONDS = 60
 DASHY_STOCK_LOTS_HORIZON_DAYS = 720
 DASHY_STOCK_LOTS_LIMIT = 200
 
+# ECM API (remote ixlsx templates)
+IXLSX_API_KEY = os.environ.get("IXLSX_API_KEY", "")
+ECM_API_BASE_URL = "https://vcrm.lightray.cloud"
+ECM_TIMEOUT_SECONDS = 60
+ECM_XLSX_TEMPLATE_NODE_ID = "DJBTl5Ls"
+ECM_EMAIL_TEMPLATE_NODE_ID = "G64RDgSJ"
+
 # Output
 OUTPUT_DIR = os.environ.get("IXLSX_OUTPUT_DIR", "/tmp")
 
@@ -74,6 +81,99 @@ EXCEL_DATE_CELL = "D2"
 EXCEL_STOCK_STATUS_COLUMN_LETTER = "C"
 EXCEL_NET_PRICE_COLUMN_LETTER = "D"
 EXCEL_DUE_DATE_COLUMN_LETTER = "I"
+
+
+# --- ECM Template Functions ---
+def fetch_ecm_asset(node_id, filename, api_key=IXLSX_API_KEY, output_dir=None, session=None):
+    """Downloads an ECM node export to a local file and returns its path."""
+    if not api_key:
+        raise ValueError("IXLSX_API_KEY is not set")
+
+    target_dir = output_dir or OUTPUT_DIR
+    os.makedirs(target_dir, exist_ok=True)
+
+    url = f"{ECM_API_BASE_URL}/api/nodes/{node_id}/-/export"
+    http_client = session or requests
+    try:
+        response = http_client.get(
+            url,
+            params={"api_key": api_key},
+            timeout=ECM_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"ECM asset {node_id} is unavailable.") from e
+
+    content = response.content
+    if not content:
+        raise RuntimeError(f"ECM asset {node_id} returned empty content.")
+
+    local_path = os.path.join(target_dir, f"ecm-{filename}")
+    with open(local_path, "wb") as f:
+        f.write(content)
+    return local_path
+
+
+def validate_xlsx_template(path):
+    workbook = load_workbook(path, read_only=True)
+    workbook.close()
+
+
+def resolve_xlsx_template_path(api_key=IXLSX_API_KEY, output_dir=None, session=None):
+    """Returns ECM XLSX template path when available, otherwise local fallback."""
+    if not api_key:
+        print("IXLSX_API_KEY not set. Using bundled XLSX template.")
+        return XLSX_TEMPLATE_PATH
+
+    try:
+        remote_path = fetch_ecm_asset(
+            ECM_XLSX_TEMPLATE_NODE_ID,
+            "vetify-template.xlsx",
+            api_key,
+            output_dir,
+            session=session,
+        )
+        validate_xlsx_template(remote_path)
+        print("Using ECM XLSX template.")
+        return remote_path
+    except Exception as e:
+        print(f"Warning: Could not use ECM XLSX template: {e}. Using bundled fallback.")
+        return XLSX_TEMPLATE_PATH
+
+
+def read_local_email_template(default_body):
+    if not os.path.exists(EMAIL_TEMPLATE_PATH):
+        print(
+            f"Warning: Email body template not found at {EMAIL_TEMPLATE_PATH}. Using default body."
+        )
+        return default_body
+    with open(EMAIL_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def resolve_email_template_html(default_body, api_key=IXLSX_API_KEY, output_dir=None, session=None):
+    """Returns ECM HTML template when available, otherwise local/default fallback."""
+    if not api_key:
+        print("IXLSX_API_KEY not set. Using bundled email template.")
+        return read_local_email_template(default_body)
+
+    try:
+        remote_path = fetch_ecm_asset(
+            ECM_EMAIL_TEMPLATE_NODE_ID,
+            "email-template.html",
+            api_key,
+            output_dir,
+            session=session,
+        )
+        with open(remote_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        if not html.strip():
+            raise RuntimeError("ECM email template is empty.")
+        print("Using ECM email template.")
+        return html
+    except Exception as e:
+        print(f"Warning: Could not use ECM email template: {e}. Using bundled fallback.")
+        return read_local_email_template(default_body)
 
 
 # --- Vendus API Functions ---
@@ -263,12 +363,13 @@ def get_nearest_available_lot_expiry_or_blank(dashy_client, sku):
 
 
 # --- XLSX Building Function ---
-def build_xlsx_file(inventory, dashy_client=None):
+def build_xlsx_file(inventory, dashy_client=None, template_path=None):
     """Builds the XLSX file from a template and inventory data."""
-    print(f"Building XLSX file from template: {XLSX_TEMPLATE_PATH}...")
-    if not os.path.exists(XLSX_TEMPLATE_PATH):
-        print(f"Error: XLSX template file not found at {XLSX_TEMPLATE_PATH}")
-        raise FileNotFoundError(f"XLSX template file not found: {XLSX_TEMPLATE_PATH}")
+    resolved_template_path = template_path or resolve_xlsx_template_path()
+    print(f"Building XLSX file from template: {resolved_template_path}...")
+    if not os.path.exists(resolved_template_path):
+        print(f"Error: XLSX template file not found at {resolved_template_path}")
+        raise FileNotFoundError(f"XLSX template file not found: {resolved_template_path}")
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         print(f"Created output directory: {OUTPUT_DIR}")
@@ -280,7 +381,7 @@ def build_xlsx_file(inventory, dashy_client=None):
     output_filepath = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
-        shutil.copy(XLSX_TEMPLATE_PATH, output_filepath)
+        shutil.copy(resolved_template_path, output_filepath)
 
         workbook = load_workbook(output_filepath)
         sheet = workbook[EXCEL_SHEET_NAME]
@@ -451,14 +552,9 @@ def test_all_e2e(test_email_recipient):
             print("Failed to build XLSX file for E2E test. Aborting.")
             return
 
-        if not os.path.exists(EMAIL_TEMPLATE_PATH):
-            print(
-                f"Warning (E2E Test): Email body template not found at {EMAIL_TEMPLATE_PATH}. Using default body."
-            )
-            email_html_body = "<p>This is a test email with the attached XLSX file.</p>"
-        else:
-            with open(EMAIL_TEMPLATE_PATH, "r", encoding="utf-8") as f:
-                email_html_body = f.read()
+        email_html_body = resolve_email_template_html(
+            "<p>This is a test email with the attached XLSX file.</p>"
+        )
 
         current_date_subject = datetime.date.today().strftime("%Y-%m-%d")
         email_subject = f"[TEST] {EMAIL_SUBJECT_TEMPLATE % current_date_subject}"
@@ -511,14 +607,9 @@ def main():
             print("Failed to build XLSX file. Aborting.")
             return
 
-        if not os.path.exists(EMAIL_TEMPLATE_PATH):
-            print(
-                f"Error: Email body template not found at {EMAIL_TEMPLATE_PATH}. Using default body."
-            )
-            email_html_body = "<p>Please find the attached XLSX file.</p>"
-        else:
-            with open(EMAIL_TEMPLATE_PATH, "r", encoding="utf-8") as f:
-                email_html_body = f.read()
+        email_html_body = resolve_email_template_html(
+            "<p>Please find the attached XLSX file.</p>"
+        )
 
         current_date_subject = datetime.date.today().strftime("%Y-%m-%d")
         email_subject = EMAIL_SUBJECT_TEMPLATE % current_date_subject
@@ -550,6 +641,7 @@ if __name__ == "__main__":
     print("=== iXLSX configuration ===")
     print(f"VENDUS_API_KEY: {'*' * 8 if VENDUS_API_KEY else 'Not set'}")
     print(f"DASHY_API_KEY: {'*' * 8 if DASHY_API_KEY else 'Not set'}")
+    print(f"IXLSX_API_KEY: {'*' * 8 if IXLSX_API_KEY else 'Not set'}")
     print(f"XLSX_TEMPLATE_PATH: {XLSX_TEMPLATE_PATH}")
     print(f"EMAIL_TEMPLATE_PATH: {EMAIL_TEMPLATE_PATH}")
     print(f"SERVICE_ACCOUNT_KEY_PATH: {SERVICE_ACCOUNT_KEY_PATH}")
