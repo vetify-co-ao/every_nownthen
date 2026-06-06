@@ -26,6 +26,37 @@ class PeriodTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rc_reports.calculate_period(14, dt.date(2026, 1, 1))
 
+    def test_period_start_date_uses_month_day_with_current_year(self):
+        start = rc_reports.period_start_date_for_year(2027, "01-01")
+
+        self.assertEqual(start, dt.date(2027, 1, 1))
+
+    def test_auto_mode_runs_period_1_thirty_days_after_start_day(self):
+        period = rc_reports.calculate_auto_period(
+            dt.date(2026, 1, 31), "01-01"
+        )
+
+        self.assertEqual(period, rc_reports.ReportPeriod(1, dt.date(2026, 1, 1), dt.date(2026, 1, 28)))
+
+    def test_auto_mode_runs_period_6_on_june_20(self):
+        period = rc_reports.calculate_auto_period(
+            dt.date(2026, 6, 20), "01-01"
+        )
+
+        self.assertEqual(period, rc_reports.ReportPeriod(6, dt.date(2026, 5, 21), dt.date(2026, 6, 17)))
+
+    def test_auto_mode_runs_period_13_on_december_30(self):
+        period = rc_reports.calculate_auto_period(
+            dt.date(2026, 12, 30), "01-01"
+        )
+
+        self.assertEqual(period, rc_reports.ReportPeriod(13, dt.date(2026, 12, 3), dt.date(2026, 12, 30)))
+
+    def test_auto_mode_returns_none_when_no_report_is_scheduled(self):
+        self.assertIsNone(
+            rc_reports.calculate_auto_period(dt.date(2026, 2, 1), "01-01")
+        )
+
 
 class FakeDashyClient:
     def __init__(self):

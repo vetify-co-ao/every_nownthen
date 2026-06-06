@@ -37,14 +37,23 @@ subsequent metric/dataset requests.
 ```bash
 cd scripts/rc_reports
 uv run rc_reports.py <period_number>
+uv run rc_reports.py auto
 ```
 
 `<period_number>` must be from `1` to `13`. Periods are inclusive 28-day
-windows. With `RC_REPORTS_PERIOD_START_DATE=2026-01-01`:
+windows. The period start year is always the current runtime year. With
+`RC_REPORTS_PERIOD_START_MONTH_DAY=01-01`:
 
 - Period 1: 2026-01-01 → 2026-01-28
 - Period 2: 2026-01-29 → 2026-02-25
 - Period 13: 2026-12-03 → 2026-12-30
+
+`auto` checks the current date and only sends on scheduled report days:
+
+- P1 runs 30 days after the period start day.
+- P2-P12 run every 28 days after P1.
+- P13 runs on 30 December every year.
+- Non-scheduled days exit successfully without sending.
 
 ## Environment variables
 
@@ -57,12 +66,23 @@ All consumed from the project-root `.env`. Documented in
 
 Optional:
 
-- `RC_REPORTS_PERIOD_START_DATE` — defaults to `<current-year>-01-01`
+- `RC_REPORTS_PERIOD_START_MONTH_DAY` — defaults to `01-01`
 - `RC_REPORTS_OUTPUT_DIR` — defaults to `/tmp`
 
 The Gmail impersonated user and email headers are fixed in `rc_reports.py`:
 `comercial@vetify.co.ao`, `Vetify <comercial@vetify.co.ao>`, and
 `encomendas@vetify.co.ao`.
+
+## Schedule
+
+Defined in `every_nownthen/crontab`:
+
+```cron
+30 9 * * * . /etc/environment; cd /app/scripts/rc_reports && /root/.local/bin/uv run rc_reports.py auto >> /var/log/cron.log 2>&1
+```
+
+The cron job runs daily at 09:30 (container `TZ`), but `auto` only sends on the
+scheduled period dates.
 
 ## Tests
 

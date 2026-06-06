@@ -35,10 +35,14 @@ DASHY_API_BASE_URL = "https://bi.vetify.co.ao"
 DASHY_TIMEOUT_SECONDS = 60
 
 # Period configuration
-DEFAULT_PERIOD_START_DATE = f"{dt.date.today().year}-01-01"
-PERIOD_START_DATE = os.environ.get(
-    "RC_REPORTS_PERIOD_START_DATE", DEFAULT_PERIOD_START_DATE
+DEFAULT_PERIOD_START_MONTH_DAY = "01-01"
+PERIOD_START_MONTH_DAY = os.environ.get(
+    "RC_REPORTS_PERIOD_START_MONTH_DAY", DEFAULT_PERIOD_START_MONTH_DAY
 )
+AUTO_START_DELAY_DAYS = 30
+AUTO_FIRST_PERIOD = 1
+AUTO_FINAL_PERIOD = 13
+AUTO_FINAL_PERIOD_RUN_MONTH_DAY = "12-30"
 
 # Output
 OUTPUT_DIR = Path(os.environ.get("RC_REPORTS_OUTPUT_DIR", "/tmp"))
@@ -92,6 +96,25 @@ def parse_date(value: str) -> dt.date:
         raise ValueError(f"Invalid date '{value}'. Expected YYYY-MM-DD.") from exc
 
 
+def parse_month_day(value: str) -> tuple[int, int]:
+    try:
+        month_text, day_text = value.split("-", 1)
+        month = int(month_text)
+        day = int(day_text)
+        dt.date(2000, month, day)
+        return month, day
+    except ValueError as exc:
+        raise ValueError(f"Invalid month/day '{value}'. Expected MM-DD.") from exc
+
+
+def period_start_date_for_year(year: int, month_day: str = PERIOD_START_MONTH_DAY) -> dt.date:
+    month, day = parse_month_day(month_day)
+    try:
+        return dt.date(year, month, day)
+    except ValueError as exc:
+        raise ValueError(f"Invalid period start month/day '{month_day}' for {year}.") from exc
+
+
 def calculate_period(period_number: int, base_date: dt.date) -> ReportPeriod:
     if period_number < 1 or period_number > 13:
         raise ValueError("Period number must be between 1 and 13.")
@@ -99,6 +122,29 @@ def calculate_period(period_number: int, base_date: dt.date) -> ReportPeriod:
     start = base_date + dt.timedelta(days=(period_number - 1) * 28)
     end = start + dt.timedelta(days=27)
     return ReportPeriod(period_number, start, end)
+
+
+def calculate_auto_period(today: dt.date, month_day: str = PERIOD_START_MONTH_DAY) -> ReportPeriod | None:
+    base_date = period_start_date_for_year(today.year, month_day)
+    final_period_run_date = period_start_date_for_year(
+        today.year, AUTO_FINAL_PERIOD_RUN_MONTH_DAY
+    )
+    if today == final_period_run_date:
+        return calculate_period(AUTO_FINAL_PERIOD, base_date)
+
+    first_run_date = base_date + dt.timedelta(days=AUTO_START_DELAY_DAYS)
+    if today < first_run_date:
+        return None
+
+    days_since_first_run = (today - first_run_date).days
+    if days_since_first_run % 28 != 0:
+        return None
+
+    period_number = AUTO_FIRST_PERIOD + (days_since_first_run // 28)
+    if period_number < AUTO_FIRST_PERIOD or period_number >= AUTO_FINAL_PERIOD:
+        return None
+
+    return calculate_period(period_number, base_date)
 
 
 def to_float(value, default: float = 0.0) -> float:
@@ -380,8 +426,7 @@ def build_email_body(period: ReportPeriod, row_count: int) -> str:
     """
 
 
-def run(period_number: int) -> Path:
-    period = calculate_period(period_number, parse_date(PERIOD_START_DATE))
+def send_report(period: ReportPeriod) -> Path:
     recipients = parse_email_recipients(RC_REPORTS_EMAIL_TO)
     if not recipients:
         raise ValueError("RC_REPORTS_EMAIL_TO must contain at least one recipient.")
@@ -410,9 +455,26 @@ def run(period_number: int) -> Path:
     return workbook_path
 
 
+def run(period_number: int) -> Path:
+    base_date = period_start_date_for_year(dt.date.today().year)
+    return send_report(calculate_period(period_number, base_date))
+
+
+def run_auto(today: dt.date | None = None) -> Path | None:
+    run_date = today or dt.date.today()
+    period = calculate_auto_period(run_date)
+    if period is None:
+        print(f"No RC report scheduled for {run_date.isoformat()}.")
+        return None
+
+    print(f"Auto mode selected P{period.number:02d} for {run_date.isoformat()}.")
+    return send_report(period)
+
+
 def print_usage():
-    print("Usage: uv run rc_reports.py <period_number>")
+    print("Usage: uv run rc_reports.py <period_number|auto>")
     print("  <period_number> must be an integer from 1 to 13.")
+    print("  auto sends only on scheduled run dates and exits successfully otherwise.")
 
 
 if __name__ == "__main__":
@@ -421,8 +483,11 @@ if __name__ == "__main__":
         sys.exit(2)
 
     try:
-        selected_period = int(sys.argv[1])
-        run(selected_period)
+        if sys.argv[1] == "auto":
+            run_auto()
+        else:
+            selected_period = int(sys.argv[1])
+            run(selected_period)
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)

@@ -26,3 +26,6 @@
 
 # iXLSX offer mailer — Mon/Thu at 08:00
 0 8 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1
+
+# Royal Canin reports — checks daily at 09:30 and sends only on scheduled period dates
+30 9 * * * . /etc/environment; cd /app/scripts/rc_reports && /root/.local/bin/uv run rc_reports.py auto >> /var/log/cron.log 2>&1
