@@ -6,653 +6,301 @@
 #     "google-api-python-client",
 #     "google-auth",
 #     "google-auth-httplib2",
+#     # Newer wheels require ARM instructions unavailable in the runtime baseline.
+#     "cryptography<47",
 # ]
 # ///
+from __future__ import annotations
+
 import base64
-import datetime
+import datetime as dt
 import json
 import os
-import shutil
-from email import encoders
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from openpyxl import load_workbook
 
-# --- Configuration Constants ---
+from models import BulletinData
+from renderers import build_email_message, build_xlsx, render_html
+from sources import (
+    AntboxClient,
+    DashyClient,
+    VendusClient,
+    load_announcements,
+    load_cargo,
+    load_products,
+    load_recipients,
+)
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Bundled assets (versioned with the script)
-XLSX_TEMPLATE_PATH = os.path.join(SCRIPT_DIR, "vetify-template.xlsx")
-EMAIL_TEMPLATE_PATH = os.path.join(SCRIPT_DIR, "email-template.html")
-
-# Vendus API
-VENDUS_API_KEY = os.environ["VENDUS_API_KEY"]
-VENDUS_API_BASE_URL = "https://www.vendus.pt/ws/v1.2"
-VENDUS_PRODUCTS_ENDPOINT = "products"
-VENDUS_CLIENTS_ENDPOINT = "clients"
-
-# Dashy API (lot expiry enrichment)
-DASHY_API_KEY = os.environ["DASHY_API_KEY"]
-DASHY_API_BASE_URL = "https://bi.vetify.co.ao"
-DASHY_TIMEOUT_SECONDS = 60
-DASHY_STOCK_LOTS_HORIZON_DAYS = 720
-DASHY_STOCK_LOTS_LIMIT = 200
-
-# ECM API (remote ixlsx templates)
-IXLSX_API_KEY = os.environ.get("IXLSX_API_KEY", "")
-ECM_API_BASE_URL = "https://vcrm.lightray.cloud"
-ECM_TIMEOUT_SECONDS = 60
-ECM_XLSX_TEMPLATE_NODE_ID = "DJBTl5Ls"
-ECM_EMAIL_TEMPLATE_NODE_ID = "G64RDgSJ"
-
-# Output
-OUTPUT_DIR = os.environ.get("IXLSX_OUTPUT_DIR", "/tmp")
-
-# Gmail API
-SERVICE_ACCOUNT_KEY_PATH = os.environ["SERVICE_ACCOUNT_KEY_PATH"]
+VCRM_API_URL = "https://vcrm.lightray.cloud/api"
+VPIM_API_URL = "https://vpim.lightray.cloud/api"
+VSCO_API_URL = "https://vsco.lightray.cloud/api"
+XLSX_TEMPLATE_NODE_ID = "DJBTl5Ls"
+HTML_TEMPLATE_NODE_ID = "G64RDgSJ"
 IMPERSONATED_EMAIL = "comercial@vetify.co.ao"
-GMAIL_API_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://mail.google.com/",
-]
-
-# Email content
-EMAIL_FROM = "Vetify <comercial@vetify.co.ao>"
-REPLY_TO = "encomendas@vetify.co.ao"
-EMAIL_SUBJECT_TEMPLATE = "Oferta Vetify %s"
-
-# E2E test recipients (comma-separated env var)
-TEST_EMAILS = [
-    e.strip() for e in os.environ.get("IXLSX_TEST_EMAILS", "").split(",") if e.strip()
-]
-
-# Excel layout
-EXCEL_SHEET_NAME = "Sheet1"
-EXCEL_FIRST_DATA_ROW = 5
-EXCEL_REF_COLUMN_LETTER = "A"
-EXCEL_DATE_CELL = "D2"
-EXCEL_STOCK_STATUS_COLUMN_LETTER = "C"
-EXCEL_NET_PRICE_COLUMN_LETTER = "D"
-EXCEL_DUE_DATE_COLUMN_LETTER = "I"
-
-
-# --- ECM Template Functions ---
-def fetch_ecm_asset(node_id, filename, api_key=IXLSX_API_KEY, output_dir=None, session=None):
-    """Downloads an ECM node export to a local file and returns its path."""
-    if not api_key:
-        raise ValueError("IXLSX_API_KEY is not set")
-
-    target_dir = output_dir or OUTPUT_DIR
-    os.makedirs(target_dir, exist_ok=True)
-
-    url = f"{ECM_API_BASE_URL}/api/nodes/{node_id}/-/export"
-    http_client = session or requests
-    try:
-        response = http_client.get(
-            url,
-            params={"api_key": api_key},
-            timeout=ECM_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"ECM asset {node_id} is unavailable.") from e
-
-    content = response.content
-    if not content:
-        raise RuntimeError(f"ECM asset {node_id} returned empty content.")
-
-    local_path = os.path.join(target_dir, f"ecm-{filename}")
-    with open(local_path, "wb") as f:
-        f.write(content)
-    return local_path
-
-
-def validate_xlsx_template(path):
-    workbook = load_workbook(path, read_only=True)
-    workbook.close()
-
-
-def resolve_xlsx_template_path(api_key=IXLSX_API_KEY, output_dir=None, session=None):
-    """Returns ECM XLSX template path when available, otherwise local fallback."""
-    if not api_key:
-        print("IXLSX_API_KEY not set. Using bundled XLSX template.")
-        return XLSX_TEMPLATE_PATH
-
-    try:
-        remote_path = fetch_ecm_asset(
-            ECM_XLSX_TEMPLATE_NODE_ID,
-            "vetify-template.xlsx",
-            api_key,
-            output_dir,
-            session=session,
-        )
-        validate_xlsx_template(remote_path)
-        print("Using ECM XLSX template.")
-        return remote_path
-    except Exception as e:
-        print(f"Warning: Could not use ECM XLSX template: {e}. Using bundled fallback.")
-        return XLSX_TEMPLATE_PATH
-
-
-def read_local_email_template(default_body):
-    if not os.path.exists(EMAIL_TEMPLATE_PATH):
-        print(
-            f"Warning: Email body template not found at {EMAIL_TEMPLATE_PATH}. Using default body."
-        )
-        return default_body
-    with open(EMAIL_TEMPLATE_PATH, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def resolve_email_template_html(default_body, api_key=IXLSX_API_KEY, output_dir=None, session=None):
-    """Returns ECM HTML template when available, otherwise local/default fallback."""
-    if not api_key:
-        print("IXLSX_API_KEY not set. Using bundled email template.")
-        return read_local_email_template(default_body)
-
-    try:
-        remote_path = fetch_ecm_asset(
-            ECM_EMAIL_TEMPLATE_NODE_ID,
-            "email-template.html",
-            api_key,
-            output_dir,
-            session=session,
-        )
-        with open(remote_path, "r", encoding="utf-8") as f:
-            html = f.read()
-        if not html.strip():
-            raise RuntimeError("ECM email template is empty.")
-        print("Using ECM email template.")
-        return html
-    except Exception as e:
-        print(f"Warning: Could not use ECM email template: {e}. Using bundled fallback.")
-        return read_local_email_template(default_body)
-
-
-# --- Vendus API Functions ---
-def get_vendus_data(endpoint, params=None):
-    """Fetches data from a Vendus API endpoint."""
-    if params is None:
-        params = {}
-    url = f"{VENDUS_API_BASE_URL}/{endpoint}/?api_key={VENDUS_API_KEY}"
-
-    query_params = []
-    for key, value in params.items():
-        query_params.append(f"{key}={value}")
-    if query_params:
-        url += "&" + "&".join(query_params)
-
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching Vendus data from {endpoint}: {e}")
-        raise
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON from Vendus {endpoint}: {e}")
-        print(f"Response text: {response.text}")
-        raise
-
-
-def get_inventory():
-    """Fetches product inventory from Vendus."""
-    print("Fetching inventory from Vendus...")
-    params = {"per_page": "500"}
-    records = get_vendus_data(VENDUS_PRODUCTS_ENDPOINT, params)
-
-    inventory_list = []
-    if records:
-        for record in records:
-            qty = 0
-            if (
-                record.get("stock")
-                and record["stock"].get("stores")
-                and len(record["stock"]["stores"]) > 0
-            ):
-                qty = record["stock"]["stores"][0].get("stock", 0)
-
-            net_price_str = record.get("prices", {}).get("net", "0")
-            try:
-                net_price = float(net_price_str)
-            except ValueError:
-                print(
-                    f"Warning: Could not parse net price '{net_price_str}' for product {record.get('reference')}. Using 0.0."
-                )
-                net_price = 0.0
-
-            inventory_list.append(
-                {
-                    "ProductId": record.get("reference"),
-                    "Qty": qty,
-                    "NetPrice": net_price,
-                }
-            )
-    print(f"Fetched {len(inventory_list)} inventory items.")
-    return inventory_list
-
-
-def get_client_emails():
-    """Fetches active client emails from Vendus."""
-    print("Fetching client emails from Vendus...")
-    params = {"per_page": "500"}
-    clients = get_vendus_data(VENDUS_CLIENTS_ENDPOINT, params)
-
-    emails = []
-    if clients:
-        for client in clients:
-            if client.get("status") == "active" and client.get("email"):
-                emails.append(client["email"])
-    print(f"Fetched {len(emails)} client emails.")
-    return emails
-
-
-# --- Dashy API Functions ---
-def to_float(value, default=0.0):
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def select_nearest_lot_expiry(stock_lots_payload):
-    """Returns the nearest YYYY-MM-DD expiry with remaining stock, or blank."""
-    lot_labels = stock_lots_payload.get("x", [])
-    remaining_quantities = stock_lots_payload.get("series", {}).get("remaining_qty", [])
-
-    expiry_dates = []
-    for index, label in enumerate(lot_labels):
-        remaining_qty = to_float(
-            remaining_quantities[index] if index < len(remaining_quantities) else 0
-        )
-        if remaining_qty <= 0:
-            continue
-
-        # Dashy OpenAPI documents stock_lots_at_risk x labels as
-        # "SKU | fornecedor | lote | validade | importação".
-        parts = [part.strip() for part in str(label).split("|")]
-        if len(parts) < 4:
-            continue
-
-        expiry_text = parts[3]
-        try:
-            expiry_dates.append(datetime.date.fromisoformat(expiry_text))
-        except ValueError:
-            print(f"Warning: Could not parse Dashy lot expiry '{expiry_text}'.")
-
-    if not expiry_dates:
-        return ""
-    return min(expiry_dates).isoformat()
-
-
-class DashyClient:
-    def __init__(self, api_key, base_url=DASHY_API_BASE_URL, session=None):
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.session = session or requests.Session()
-        self.session.headers.update(
-            {"Accept": "application/json", "User-Agent": "every-nownthen-ixlsx/1.0"}
-        )
-        self._authenticated = False
-
-    def _get(self, path, params=None, include_api_key=False):
-        request_params = dict(params or {})
-        if include_api_key:
-            request_params["api_key"] = self.api_key
-
-        try:
-            response = self.session.get(
-                f"{self.base_url}{path}",
-                params=request_params,
-                timeout=DASHY_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            details = (
-                getattr(e.response, "text", "")
-                if getattr(e, "response", None)
-                else ""
-            )
-            details = details.replace(self.api_key, "***")
-            status = getattr(getattr(e, "response", None), "status_code", "unknown")
-            raise RuntimeError(
-                f"Dashy request failed for {path} (status={status}). {details[:500]}"
-            ) from e
-        except ValueError as e:
-            raise RuntimeError(f"Dashy returned invalid JSON for {path}.") from e
-
-    def authenticate(self):
-        if self._authenticated:
-            return
-
-        # The Dashy OpenAPI documents ApiKeyQuery as `api_key` and notes that
-        # a valid key creates a temporary Dashy session cookie. Dataset calls
-        # then use that cookie and must not repeat api_key as a business param.
-        self._get("/api/dimensions/product", include_api_key=True)
-        self._authenticated = True
-
-    def get_nearest_available_lot_expiry(self, sku):
-        self.authenticate()
-        payload = self._get(
-            "/api/datasets/stock_lots_at_risk",
-            params={
-                "product_sku": sku,
-                "horizon_days": DASHY_STOCK_LOTS_HORIZON_DAYS,
-                "limit": DASHY_STOCK_LOTS_LIMIT,
-            },
-        )
-        return select_nearest_lot_expiry(payload)
-
-
-def get_nearest_available_lot_expiry_or_blank(dashy_client, sku):
-    try:
-        return dashy_client.get_nearest_available_lot_expiry(sku)
-    except Exception as e:
-        print(f"Warning: Could not fetch Dashy lot expiry for {sku}: {e}")
-        return ""
-
-
-# --- XLSX Building Function ---
-def build_xlsx_file(inventory, dashy_client=None, template_path=None):
-    """Builds the XLSX file from a template and inventory data."""
-    resolved_template_path = template_path or resolve_xlsx_template_path()
-    print(f"Building XLSX file from template: {resolved_template_path}...")
-    if not os.path.exists(resolved_template_path):
-        print(f"Error: XLSX template file not found at {resolved_template_path}")
-        raise FileNotFoundError(f"XLSX template file not found: {resolved_template_path}")
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        print(f"Created output directory: {OUTPUT_DIR}")
-
-    today_date_str_filename = datetime.date.today().strftime("%Y-%m-%d")
-    today_date_str_cell = datetime.date.today().strftime("%d/%m/%Y")
-
-    output_filename = f"Vetify-{today_date_str_filename}.xlsx"
-    output_filepath = os.path.join(OUTPUT_DIR, output_filename)
-
-    try:
-        shutil.copy(resolved_template_path, output_filepath)
-
-        workbook = load_workbook(output_filepath)
-        sheet = workbook[EXCEL_SHEET_NAME]
-
-        sheet[EXCEL_DATE_CELL] = today_date_str_cell
-
-        inventory_map = {item["ProductId"]: item for item in inventory}
-        lot_expiry_client = dashy_client or DashyClient(DASHY_API_KEY)
-        lot_expiry_cache = {}
-
-        row_index = EXCEL_FIRST_DATA_ROW
-        while True:
-            ref_cell_addr = f"{EXCEL_REF_COLUMN_LETTER}{row_index}"
-            product_ref = sheet[ref_cell_addr].value
-
-            if not product_ref:
-                break
-
-            if product_ref in inventory_map:
-                product_data = inventory_map[product_ref]
-                qty = product_data.get("Qty", 0)
-
-                stock_status_msg = "EM STOCK"
-                if qty <= 0:
-                    stock_status_msg = "ESGOTADO"
-                elif qty < 20:
-                    stock_status_msg = "ULTIMAS UNIDADES"
-                sheet[f"{EXCEL_STOCK_STATUS_COLUMN_LETTER}{row_index}"] = (
-                    stock_status_msg
-                )
-
-                sheet[f"{EXCEL_NET_PRICE_COLUMN_LETTER}{row_index}"] = product_data.get(
-                    "NetPrice", 0.0
-                )
-
-                due_date_cell = f"{EXCEL_DUE_DATE_COLUMN_LETTER}{row_index}"
-                if qty <= 0:
-                    sheet[due_date_cell] = ""
-                else:
-                    if product_ref not in lot_expiry_cache:
-                        lot_expiry_cache[product_ref] = (
-                            get_nearest_available_lot_expiry_or_blank(
-                                lot_expiry_client, product_ref
-                            )
-                        )
-                    sheet[due_date_cell] = lot_expiry_cache[product_ref]
-
-            row_index += 1
-
-        workbook.save(output_filepath)
-        print(f"XLSX file successfully built and saved to: {output_filepath}")
-        return output_filepath
-    except Exception as e:
-        print(f"Error building XLSX file: {e}")
-        raise
-
-
-# --- Gmail API Functions ---
-def create_gmail_service():
-    """Creates and returns an authorized Gmail API service instance."""
-    print("Initializing Gmail API service...")
-    if not os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
-        print(
-            f"Error: Service account key file not found at {SERVICE_ACCOUNT_KEY_PATH}"
-        )
-        raise FileNotFoundError(
-            f"Service account key file not found: {SERVICE_ACCOUNT_KEY_PATH}"
-        )
-
-    try:
-        creds = Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_KEY_PATH,
-            scopes=GMAIL_API_SCOPES,
-            subject=IMPERSONATED_EMAIL,
-        )
-        service = build("gmail", "v1", credentials=creds)
-        print("Gmail API service initialized successfully.")
-        return service
-    except Exception as e:
-        print(f"Error creating Gmail service: {e}")
-        raise
-
-
-def build_email_message(bcc_emails, subject, html_body_content, attachment_path):
-    """Builds the email MIME payload for Gmail API delivery."""
-    message = MIMEMultipart()
-    message["bcc"] = ", ".join(bcc_emails)
-    message["reply-to"] = REPLY_TO
-    message["from"] = EMAIL_FROM
-    message["subject"] = subject
-
-    message.attach(MIMEText(html_body_content, "html"))
-
-    if attachment_path and os.path.exists(attachment_path):
-        try:
-            with open(attachment_path, "rb") as attachment_file:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(attachment_file.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                "Content-Disposition",
-                f'attachment; filename="{os.path.basename(attachment_path)}"',
-            )
-            message.attach(part)
-            print(f"Attachment {os.path.basename(attachment_path)} added to email.")
-        except Exception as e:
-            print(f"Error attaching file {attachment_path}: {e}")
-    else:
-        print(
-            f"Warning: Attachment path {attachment_path} not found or not specified. Sending email without attachment."
-        )
-
-    return message
-
-
-def send_email(gmail_service, to_emails, subject, html_body_content, attachment_path):
-    """Sends an email with attachment using Gmail API."""
-    if not to_emails:
-        print("No recipients provided. Skipping email send.")
-        return
-
-    print(f"Preparing to send email to {len(to_emails)} recipients...")
-
-    message = build_email_message(
-        to_emails, subject, html_body_content, attachment_path
+GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+
+
+@dataclass(frozen=True)
+class Config:
+    vendus_api_key: str
+    vcrm_api_key: str
+    vpim_api_key: str
+    dashy_api_key: str
+    vsco_api_key: str
+    service_account_key_path: Path | None
+    output_dir: Path
+    test_emails: list[str]
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required environment variable is missing: {name}")
+    return value
+
+
+def load_config() -> Config:
+    service_account = os.environ.get("SERVICE_ACCOUNT_KEY_PATH", "").strip()
+    return Config(
+        vendus_api_key=_required_env("VENDUS_API_KEY"),
+        vcrm_api_key=_required_env("VCRM_API_KEY"),
+        vpim_api_key=_required_env("VPIM_API_KEY"),
+        dashy_api_key=os.environ.get("DASHY_API_KEY", "").strip(),
+        vsco_api_key=os.environ.get("VSCO_API_KEY", "").strip(),
+        service_account_key_path=Path(service_account) if service_account else None,
+        output_dir=Path(os.environ.get("IXLSX_OUTPUT_DIR", "/tmp")),
+        test_emails=sorted(
+            {
+                value.strip().lower()
+                for value in os.environ.get("IXLSX_TEST_EMAILS", "").split(",")
+                if value.strip()
+            }
+        ),
     )
-    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    gmail_message_body = {"raw": raw_message}
 
-    try:
-        sent_message = (
-            gmail_service.users()
-            .messages()
-            .send(userId="me", body=gmail_message_body)
-            .execute()
-        )
-        print(f"Email sent successfully! Message ID: {sent_message['id']}")
-    except HttpError as error:
-        print(f"An HTTP error occurred while sending email: {error}")
-        error_details = error.resp.get("content", "{}")
+
+def issue_number(publication_date: dt.date) -> int:
+    week = publication_date.isocalendar().week
+    return week * 2 - (1 if publication_date.weekday() < 3 else 0)
+
+
+def subject_for(bulletin: BulletinData, test: bool = False) -> str:
+    prefix = "[TEST] " if test else ""
+    return (
+        f"{prefix}Boletim Bissemanal Vetify · N.º {bulletin.issue_number} · "
+        f"{bulletin.publication_date.strftime('%d/%m/%Y')}"
+    )
+
+
+def build_bulletin(
+    config: Config, publication_date: dt.date
+) -> tuple[BulletinData, AntboxClient]:
+    vcrm = AntboxClient(VCRM_API_URL, config.vcrm_api_key)
+    vpim = AntboxClient(VPIM_API_URL, config.vpim_api_key)
+
+    recipients = load_recipients(vcrm)
+    announcements = load_announcements(vcrm, publication_date)
+    vendus_records = VendusClient(config.vendus_api_key).products()
+    if not vendus_records:
+        raise RuntimeError("Vendus returned no products")
+
+    anomalies: list[str] = []
+    degradations: list[str] = []
+    expiries = {}
+    if config.dashy_api_key:
         try:
-            error_json = json.loads(error_details.decode("utf-8"))
-            print(f"Error details: {json.dumps(error_json, indent=2)}")
-        except json.JSONDecodeError:
-            print(f"Raw error content: {error_details}")
-        raise
-    except Exception as e:
-        print(f"An unexpected error occurred while sending email: {e}")
-        raise
+            expiries = DashyClient(config.dashy_api_key).future_expiries(
+                publication_date
+            )
+        except (
+            requests.RequestException,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            degradations.append(f"Dashy unavailable; expiry dates omitted: {error}")
+    else:
+        degradations.append("DASHY_API_KEY not configured; expiry dates omitted")
+
+    products, product_anomalies = load_products(vpim, vendus_records, expiries)
+    anomalies.extend(product_anomalies)
+
+    recent_arrivals = []
+    in_transit = []
+    if config.vsco_api_key:
+        try:
+            vsco = AntboxClient(VSCO_API_URL, config.vsco_api_key)
+            recent_arrivals, in_transit = load_cargo(vsco, publication_date)
+        except (
+            requests.RequestException,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            degradations.append(f"VSCO unavailable; cargo sections omitted: {error}")
+    else:
+        degradations.append("VSCO_API_KEY not configured; cargo sections omitted")
+
+    bulletin = BulletinData(
+        publication_date=publication_date,
+        issue_number=issue_number(publication_date),
+        recipients=recipients,
+        products=products,
+        announcements=announcements,
+        recent_arrivals=recent_arrivals,
+        in_transit=in_transit,
+        anomalies=anomalies,
+        degradations=degradations,
+    )
+    return bulletin, vcrm
 
 
-# --- Test E2E Function ---
-def test_all_e2e(test_email_recipient):
-    """Runs an end-to-end test, sending the email only to test addresses."""
-    print("Starting E2E test for iXLSX script...")
-    if not test_email_recipient:
-        print("IXLSX_TEST_EMAILS env var is empty. Aborting E2E test.")
-        return
+def generate_artifacts(
+    config: Config,
+    bulletin: BulletinData,
+    vcrm: AntboxClient,
+) -> tuple[Path, Path, str, Path]:
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    date_text = bulletin.publication_date.isoformat()
+    xlsx_template = (
+        config.output_dir / f".vcrm-{XLSX_TEMPLATE_NODE_ID}-{date_text}.xlsx"
+    )
+    html_template = (
+        config.output_dir / f".vcrm-{HTML_TEMPLATE_NODE_ID}-{date_text}.html"
+    )
+    xlsx_output = config.output_dir / f"Vetify-Encomendas-{date_text}.xlsx"
+    html_output = config.output_dir / f"Boletim-Bissemanal-Vetify-{date_text}.html"
+    report_output = config.output_dir / f"Boletim-Bissemanal-Vetify-{date_text}.json"
+
     try:
-        inventory = get_inventory()
-
-        if not inventory:
-            print("No inventory data fetched for E2E test. Aborting.")
-            return
-
-        xlsx_filepath = build_xlsx_file(inventory)
-        if not xlsx_filepath:
-            print("Failed to build XLSX file for E2E test. Aborting.")
-            return
-
-        email_html_body = resolve_email_template_html(
-            "<p>This is a test email with the attached XLSX file.</p>"
-        )
-
-        current_date_subject = datetime.date.today().strftime("%Y-%m-%d")
-        email_subject = f"[TEST] {EMAIL_SUBJECT_TEMPLATE % current_date_subject}"
-
-        gmail_service = create_gmail_service()
-
-        send_email(
-            gmail_service,
-            test_email_recipient,
-            email_subject,
-            email_html_body,
-            xlsx_filepath,
-        )
-
-        print("iXLSX E2E test finished successfully.")
-
-    except FileNotFoundError as e:
-        print(f"Configuration Error (E2E Test): A required file was not found: {e}")
-    except Exception as e:
-        print(f"An error occurred during E2E test execution: {e}")
-        import traceback
-
-        traceback.print_exc()
+        vcrm.export(XLSX_TEMPLATE_NODE_ID, xlsx_template)
+        vcrm.export(HTML_TEMPLATE_NODE_ID, html_template)
+        build_xlsx(xlsx_template, xlsx_output, bulletin)
+        rendered_html = render_html(html_template.read_text(encoding="utf-8"), bulletin)
+        html_output.write_text(rendered_html, encoding="utf-8")
     finally:
-        print("E2E test execution ended.")
+        xlsx_template.unlink(missing_ok=True)
+        html_template.unlink(missing_ok=True)
+
+    report = {
+        "publicationDate": date_text,
+        "issueNumber": bulletin.issue_number,
+        "recipientCount": len(bulletin.recipients),
+        "productCount": len(bulletin.products),
+        "featuredCount": sum(product.featured for product in bulletin.products),
+        "announcementCount": len(bulletin.announcements),
+        "recentArrivalCount": len(bulletin.recent_arrivals),
+        "inTransitCount": len(bulletin.in_transit),
+        "anomalies": bulletin.anomalies,
+        "degradations": bulletin.degradations,
+        "templates": {
+            "xlsx": XLSX_TEMPLATE_NODE_ID,
+            "html": HTML_TEMPLATE_NODE_ID,
+            "source": "VCRM",
+        },
+    }
+    report_output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return xlsx_output, html_output, rendered_html, report_output
 
 
-# --- Main Script Logic ---
-def main():
-    print("Starting iXLSX script...")
-    try:
-        inventory = get_inventory()
-        client_emails = get_client_emails()
+def create_gmail_service(config: Config):
+    path = config.service_account_key_path
+    if not path or not path.is_file():
+        raise RuntimeError("SERVICE_ACCOUNT_KEY_PATH must point to a readable JSON key")
+    credentials = Credentials.from_service_account_file(
+        path,
+        scopes=GMAIL_SCOPES,
+        subject=IMPERSONATED_EMAIL,
+    )
+    return build("gmail", "v1", credentials=credentials)
 
-        if not inventory:
-            print("No inventory data fetched. Aborting.")
-            return
 
-        final_email_list = sorted(
-            list(set(email.lower() for email in client_emails if email))
+def send_message(gmail_service, message) -> str:
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    response = (
+        gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    )
+    message_id = response.get("id") if isinstance(response, dict) else None
+    if not message_id:
+        raise RuntimeError("Gmail did not return a message ID")
+    return str(message_id)
+
+
+def run(mode: str, publication_date: dt.date | None = None) -> dict:
+    config = load_config()
+    publication_date = (
+        publication_date or dt.datetime.now(ZoneInfo("Africa/Luanda")).date()
+    )
+    if mode == "send" and publication_date.weekday() not in {0, 3}:
+        raise RuntimeError("Production delivery is allowed only on Monday or Thursday")
+
+    bulletin, vcrm = build_bulletin(config, publication_date)
+    if mode == "send" and not bulletin.recipients:
+        raise RuntimeError("VCRM returned no eligible recipients")
+    if mode == "test" and not config.test_emails:
+        raise RuntimeError("IXLSX_TEST_EMAILS is required in test mode")
+
+    xlsx_path, html_path, rendered_html, report_path = generate_artifacts(
+        config, bulletin, vcrm
+    )
+    result = {
+        "mode": mode,
+        "xlsx": str(xlsx_path),
+        "html": str(html_path),
+        "report": str(report_path),
+        "recipients": len(bulletin.recipients),
+    }
+
+    if mode == "dry-run":
+        eml_path = (
+            config.output_dir
+            / f"Boletim-Bissemanal-Vetify-{publication_date.isoformat()}.eml"
         )
-        print(f"Total unique emails to send to: {len(final_email_list)}.")
-
-        if not final_email_list:
-            print("No email recipients. Aborting email send.")
-            return
-
-        xlsx_filepath = build_xlsx_file(inventory)
-        if not xlsx_filepath:
-            print("Failed to build XLSX file. Aborting.")
-            return
-
-        email_html_body = resolve_email_template_html(
-            "<p>Please find the attached XLSX file.</p>"
+        message = build_email_message(
+            bulletin.recipients,
+            subject_for(bulletin),
+            rendered_html,
+            xlsx_path,
+            simulation=True,
         )
+        eml_path.write_bytes(message.as_bytes())
+        result["eml"] = str(eml_path)
+        return result
 
-        current_date_subject = datetime.date.today().strftime("%Y-%m-%d")
-        email_subject = EMAIL_SUBJECT_TEMPLATE % current_date_subject
+    recipients = config.test_emails if mode == "test" else bulletin.recipients
+    message = build_email_message(
+        recipients,
+        subject_for(bulletin, test=mode == "test"),
+        rendered_html,
+        xlsx_path,
+    )
+    result["messageId"] = send_message(create_gmail_service(config), message)
+    return result
 
-        gmail_service = create_gmail_service()
 
-        send_email(
-            gmail_service,
-            final_email_list,
-            email_subject,
-            email_html_body,
-            xlsx_filepath,
-        )
-
-        print("iXLSX script finished successfully.")
-
-    except FileNotFoundError as e:
-        print(f"Configuration Error: A required file was not found: {e}")
-    except Exception as e:
-        print(f"An error occurred during script execution: {e}")
-        import traceback
-
-        traceback.print_exc()
-    finally:
-        print("Script execution ended.")
+def cli(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        mode = "send"
+    elif arguments == ["--dry-run"]:
+        mode = "dry-run"
+    elif arguments == ["test", "all_e2e"]:
+        mode = "test"
+    else:
+        print("Usage: ixlsx.py [--dry-run | test all_e2e]", file=sys.stderr)
+        return 2
+    result = run(mode)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    print("=== iXLSX configuration ===")
-    print(f"VENDUS_API_KEY: {'*' * 8 if VENDUS_API_KEY else 'Not set'}")
-    print(f"DASHY_API_KEY: {'*' * 8 if DASHY_API_KEY else 'Not set'}")
-    print(f"IXLSX_API_KEY: {'*' * 8 if IXLSX_API_KEY else 'Not set'}")
-    print(f"XLSX_TEMPLATE_PATH: {XLSX_TEMPLATE_PATH}")
-    print(f"EMAIL_TEMPLATE_PATH: {EMAIL_TEMPLATE_PATH}")
-    print(f"SERVICE_ACCOUNT_KEY_PATH: {SERVICE_ACCOUNT_KEY_PATH}")
-    print(f"OUTPUT_DIR: {OUTPUT_DIR}")
-    print("===========================")
-
-    import sys
-
-    if len(sys.argv) >= 3 and sys.argv[1] == "test" and sys.argv[2] == "all_e2e":
-        test_all_e2e(TEST_EMAILS)
-    elif len(sys.argv) > 1:
-        print("Invalid arguments")
-    else:
-        main()
+    raise SystemExit(cli())

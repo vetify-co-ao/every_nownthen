@@ -1,88 +1,108 @@
-# iXLSX
+# Boletim Bissemanal Vetify
 
-Scheduled offer mailer that runs as a script inside the
-[every_nownthen](../../README.md) runner.
+Scheduled operational bulletin and reseller order workbook. It runs on Monday
+and Thursday at 08:00 in `Africa/Luanda`.
 
-What it does:
+## Sources
 
-1. Pulls product inventory and active client emails from the Vendus API.
-2. Pulls nearest available lot expiries from Dashy for stocked products.
-3. Downloads the XLSX and HTML templates from the ECM when `IXLSX_API_KEY` is set,
-   falling back to bundled files if unavailable.
-4. Fills the XLSX template with stock status, net price, current offer date,
-   and due date.
-5. Renders the HTML email body.
-6. Sends the result via the Gmail API (service account with domain-wide
-   delegation), BCC'ing all clients.
+| Source | Purpose | Failure policy |
+|---|---|---|
+| VCRM | Recipient emails, announcements, HTML/XLSX templates | Abort |
+| VPIM | Active catalog, taxonomy, price, VAT, highlights | Abort |
+| Vendus | Live stock | Abort |
+| Dashy | Nearest future lot expiry with remaining quantity | Leave expiries blank |
+| VSCO | Cargo in transit and cleared in the last seven days | Omit cargo sections |
 
-## Schedule
+All source access is read-only. Templates are always downloaded from VCRM:
 
-Defined in `every_nownthen/crontab`:
+- XLSX node `DJBTl5Ls`
+- HTML node `G64RDgSJ`
 
-```
-0 8 * * mon,thu . /etc/environment; cd /app/scripts/ixlsx && /root/.local/bin/uv run ixlsx.py >> /var/log/cron.log 2>&1
-```
+There is no bundled template or local fallback.
 
-Mondays and Thursdays at 08:00 (container `TZ`).
+## Business rules
 
-## Dependencies
+- Recipients are deduplicated primary emails from VCRM resellers in `Activo` or
+  `Incumprimento`; establishment emails are not used.
+- Every active VPIM product appears in the XLSX, including products not found in
+  Vendus.
+- Availability is `SOB CONSULTA` without a Vendus match, `ESGOTADO` at stock
+  `<= 0`, `ULTIMAS UNIDADES` at stock `<= commercial-performance:minimum-stock`,
+  and `EM STOCK` above it. Missing minimum stock uses 10 and records an anomaly.
+- Price and VAT come from VPIM. Multiple categories/subcategories are joined by
+  ` · `.
+- Expiry is filled only for positive Vendus stock and uses the nearest future
+  Dashy lot with positive remaining quantity.
+- Every active VCRM announcement is shown to every recipient; target metadata is
+  intentionally ignored. Start/end dates determine whether it is active.
+- Every active featured VPIM product is rendered. Missing image or description
+  removes only that element from its card.
+- Cargo cards show the nature of the goods, never individual SKUs.
+- Issue numbers are `(ISO week × 2) − 1` for the Monday edition and
+  `ISO week × 2` for the Thursday edition.
 
-Declared inline at the top of `ixlsx.py` using PEP 723 script metadata. UV
-materialises them on first `uv run` and caches the venv. No `pyproject.toml`
-or `requirements.txt`.
+## Commands
 
-## Environment variables
+Generate HTML, XLSX, EML, and JSON report without calling Gmail:
 
-Consumed from the project-root `.env` and documented in
-`every_nownthen/.env.info` under the "iXLSX" section. Required:
-`VENDUS_API_KEY`, `DASHY_API_KEY`, `SERVICE_ACCOUNT_KEY_PATH`.
-
-Optional:
-
-- `IXLSX_API_KEY` — ECM API key for runtime template downloads.
-
-The Gmail impersonated user and email headers are fixed in `ixlsx.py`:
-`comercial@vetify.co.ao`, `Vetify <comercial@vetify.co.ao>`,
-`encomendas@vetify.co.ao`, and `Oferta Vetify %s`.
-
-## Template assets
-
-Runtime ECM templates are used when `IXLSX_API_KEY` is set:
-
-- `vetify-template.xlsx` — ECM node `DJBTl5Ls`
-- `email-template.html` — ECM node `G64RDgSJ`
-
-Both are downloaded via:
-
-```
-https://vcrm.lightray.cloud/api/nodes/<NODE_ID>/-/export?api_key=<IXLSX_API_KEY>
+```bash
+cd scripts/ixlsx
+uv run ixlsx.py --dry-run
 ```
 
-Fallback bundled assets remain in-repo:
+Send an end-to-end test only to `IXLSX_TEST_EMAILS`:
 
-- `vetify-template.xlsx` — Excel template. Sheet `Sheet1`, references in
-  column A from row 5, date cell `D2`. Stock status → C, net price → D,
-  due date → I. Column I is cleared when out of stock; when stocked, Dashy
-  `stock_lots_at_risk` is queried with `horizon_days=720` and `limit=200`,
-  and the nearest available lot expiry is written as `YYYY-MM-DD`. If Dashy
-  fails or no available lot exists, I is left blank.
-- `email-template.html` — HTML email body.
-
-Fallback is per asset: if one ECM download fails, only that file falls back to
-its bundled project copy.
-
-## E2E test
-
-```
-docker compose exec app sh -c \
-  "cd /app/scripts/ixlsx && uv run ixlsx.py test all_e2e"
+```bash
+uv run ixlsx.py test all_e2e
 ```
 
-Sends to the addresses in `IXLSX_TEST_EMAILS` only. Requires that var to be
-set; otherwise the test aborts.
+Normal production delivery (used by cron):
+
+```bash
+uv run ixlsx.py
+```
+
+Production delivery fails outside Monday/Thursday. All mandatory-source,
+template, attachment, and Gmail errors produce a non-zero process exit.
+
+## Environment
+
+Required:
+
+- `VENDUS_API_KEY`
+- `VCRM_API_KEY`
+- `VPIM_API_KEY`
+
+Required for Gmail delivery:
+
+- `SERVICE_ACCOUNT_KEY_PATH` points to the mounted Google JSON key.
+
+Optional enrichments and settings:
+
+- `DASHY_API_KEY`
+- `VSCO_API_KEY`
+- `IXLSX_OUTPUT_DIR` controls artifact output (default `/tmp`).
+- `IXLSX_TEST_EMAILS` controls test recipients.
+
+See [`.env.info`](../../.env.info) for the complete contract.
+
+## XLSX
+
+The renderer corrects the VCRM workbook at runtime:
+
+- products begin at row 6;
+- `F = D × (1 + E)`;
+- `H = IF(G="", "", G × F)`;
+- `H3 = SUM(H6:Húltima_linha)`;
+- table, validation, and conditional-format ranges end on the final product row;
+- freeze pane is `A6`;
+- hidden brand and availability lists are refreshed.
 
 ## Tests
 
-```
-cd scripts/ixlsx && uv run --with pytest --with requests --with openpyxl --with google-api-python-client --with google-auth --with google-auth-httplib2 -m pytest tests
+```bash
+cd scripts/ixlsx
+uv run --with pytest --with requests --with openpyxl \
+  --with google-api-python-client --with google-auth \
+  --with google-auth-httplib2 -m pytest
 ```

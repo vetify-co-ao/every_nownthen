@@ -36,6 +36,9 @@ RUN chmod +x /app/install_uv_tools.sh
 # Install UV tools from Git repositories
 RUN /app/install_uv_tools.sh
 
+# Warm the iXLSX PEP 723 environment during the image build.
+RUN uv sync --script /app/scripts/ixlsx/ixlsx.py
+
 # Create log directory for cron
 RUN mkdir -p /var/log && touch /var/log/cron.log
 
