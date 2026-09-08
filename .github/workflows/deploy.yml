@@ -4,12 +4,35 @@ on:
   push:
     tags: ["*"]
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Test iXLSX
+        run: |
+          cd scripts/ixlsx
+          uv run --with pytest --with requests --with openpyxl \
+            --with google-api-python-client --with google-auth \
+            --with google-auth-httplib2 -m pytest -q
+
+      - name: Test RC reports
+        run: |
+          cd scripts/rc_reports
+          uv run --with pytest --with requests --with openpyxl \
+            --with google-api-python-client --with google-auth \
+            --with google-auth-httplib2 -m pytest -q
 
       - name: Create tag
         run: |
@@ -46,3 +69,16 @@ jobs:
 
       - name: Verify deployment
         run: kubectl -n vetify rollout status deployment/every-nownthen
+
+      - name: Verify iXLSX in the deployed pod
+        run: |
+          POD=$(kubectl -n vetify get pod -l app=every-nownthen -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n vetify exec "$POD" -- sh -lc \
+            '. /etc/environment; cd /app/scripts/ixlsx && uv run ixlsx.py --dry-run'
+
+      - name: Remove legacy credential ConfigMaps
+        run: |
+          kubectl -n vetify delete configmap \
+            every-nownthen-env-config \
+            every-nownthen-service-account-key-path-config \
+            --ignore-not-found
